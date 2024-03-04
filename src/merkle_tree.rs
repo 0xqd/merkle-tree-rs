@@ -26,6 +26,7 @@ pub struct MerkleTree {
 
     pub(crate) height: u32,
     pub(crate) is_dirty: bool, // for lazy root update
+    pub(crate) default: Hash,
 }
 
 fn tree_height(leaf_count: usize) -> u32 {
@@ -57,6 +58,7 @@ impl MerkleTree {
             is_dirty: false,
             cur_leaf_idx: 0,
             nodes: vec![default; capacity], // pre_init the tree
+            default,
         }
     }
 
@@ -95,9 +97,9 @@ impl MerkleTree {
                 let right = self.nodes[i + 1];
                 let parent = (i / 2) as usize;
 
-                let parent_hash = if left == Hash::default() {
+                let parent_hash = if left == self.default {
                     hash_node!(right, right)
-                } else if right == Hash::default() {
+                } else if right == self.default {
                     hash_node!(left, left)
                 } else {
                     hash_node!(left, right)
@@ -116,7 +118,7 @@ impl MerkleTree {
     /// Returns the proof for give key
     pub fn prove(&self, key: &Vec<u8>) -> Option<Vec<Hash>> {
         let hash = hash_leaf!(key);
-        if hash == Hash::default() {
+        if hash == self.default {
             return None;
         }
 

@@ -3,6 +3,8 @@
 .DS_Store
 Thumbs.db
 
+
+Cargo.lock
 # IDE files
 .vscode/
 .idea/
