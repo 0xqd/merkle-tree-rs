@@ -1,5 +1,8 @@
-use solana_program::hash::{hashv, Hash};
 use std::mem::replace;
+
+use anyhow::{bail, Result};
+use solana_program::hash::{hashv, Hash};
+use thiserror::Error;
 
 const LEAF_PREFIX: &[u8] = &[0];
 const NODE_PREFIX: &[u8] = &[1];
@@ -17,6 +20,14 @@ macro_rules! hash_node {
         // The hash function can be easily replace with any other
         hashv(&[NODE_PREFIX, $lnode.as_ref(), $rnode.as_ref()])
     };
+}
+
+#[derive(Error, Debug)]
+pub enum MerkleTreeError {
+    #[error("Invalid leaf count")]
+    InvalidLeafCount,
+    #[error("Exceeded leaf count")]
+    ExceededLeafCount,
 }
 
 pub struct MerkleTree {
@@ -37,46 +48,41 @@ fn tree_height(leaf_count: usize) -> u32 {
     leaf_count.ilog2()
 }
 
-fn tree_capacity(height: u32) -> u32 {
-    2u32.pow(height + 1) // dont -1, we need the extra to store the root hash
-}
-
 impl MerkleTree {
-    pub fn new(leaf_count: usize, default: Hash) -> Self {
+    pub fn new(leaf_count: usize, default: Hash) -> Result<Self> {
         if leaf_count == 0 || leaf_count % 2 != 0 {
-            // encourage non odd leaf_count to be power of 2 to simplify implementation
-            // TODO: thiserror
-            panic!("MerkleTree::new: leaf_count cannot be 0");
+            bail!(MerkleTreeError::InvalidLeafCount);
         }
 
         let height = tree_height(leaf_count);
-        let capacity = tree_capacity(height) as usize;
+        let capacity = leaf_count << 1;
 
-        Self {
+        Ok(Self {
             height,
             leaf_count,
             is_dirty: false,
             cur_leaf_idx: 0,
             nodes: vec![default; capacity], // pre_init the tree
             default,
-        }
+        })
     }
 
-    pub fn insert<T>(&mut self, leaf: T) -> usize
+    pub fn insert<T>(&mut self, leaf: T) -> Result<usize>
     where
         T: AsRef<[u8]>,
     {
-        // assert cur_leaf_idx doesnt exceed the leafcount
+        if self.cur_leaf_idx >= self.leaf_count {
+            bail!(MerkleTreeError::ExceededLeafCount);
+        }
 
         let leaf_hash = hash_leaf!(leaf);
-        let leaf_idx = self.nodes.len() - (self.leaf_count - self.cur_leaf_idx);
+        let leaf_idx = self.leaf_count + self.cur_leaf_idx;
 
-        // the vlaue should not be there
         let _ = replace(&mut self.nodes[leaf_idx], leaf_hash);
         self.cur_leaf_idx += 1;
         self.is_dirty = true;
 
-        self.cur_leaf_idx
+        Ok(self.cur_leaf_idx)
     }
 
     pub fn get_root(&mut self) -> Option<&Hash> {
@@ -95,7 +101,7 @@ impl MerkleTree {
             for i in (from..to).step_by(2) {
                 let left = self.nodes[i];
                 let right = self.nodes[i + 1];
-                let parent = (i / 2) as usize;
+                let parent = i / 2;
 
                 let parent_hash = if left == self.default {
                     hash_node!(right, right)
@@ -116,14 +122,10 @@ impl MerkleTree {
     }
 
     /// Returns the proof for give key
-    pub fn prove(&mut self, key: &Vec<u8>) -> Option<Vec<Hash>> {
+    pub fn prove(&self, key: &Vec<u8>) -> Option<Vec<Hash>> {
         let hash = hash_leaf!(key);
         if hash == self.default {
             return None;
-        }
-
-        if self.is_dirty {
-            self.update_root();
         }
 
         let from = self.nodes.len() - self.leaf_count;
@@ -138,17 +140,13 @@ impl MerkleTree {
 
             Some(proof)
         } else {
-            return None;
+            None
         }
     }
 
-    pub fn verify_proof(&mut self, proof: &Vec<Hash>) -> bool {
+    pub fn verify_proof(&self, proof: &Vec<Hash>) -> bool {
         if proof.len() != (self.height + 1) as usize {
             return false;
-        }
-
-        if self.is_dirty {
-            self.update_root();
         }
 
         let from = self.nodes.len() - self.leaf_count;
@@ -174,24 +172,59 @@ impl MerkleTree {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hash, MerkleTree};
+    use super::*;
+    use anyhow::Result;
+    use quickcheck_macros::quickcheck;
+
+    fn sample_tree() -> MerkleTree {
+        let mut tree = MerkleTree::new(4, Hash::default()).unwrap();
+        tree.insert(b"a").unwrap();
+        tree.insert(b"b").unwrap();
+        tree.insert(b"c").unwrap();
+        tree.insert(b"d").unwrap();
+        tree
+    }
 
     #[test]
-    fn test_sanity() {
-        let mut tree = MerkleTree::new(4, Hash::default());
-        tree.insert(b"a");
-        tree.insert(b"b");
-        tree.insert(b"c");
-        // tree.insert(b"d");
+    fn test_sanity() -> Result<()> {
+        let mut tree = sample_tree();
         let root = tree.get_root();
-        dbg!(&root);
+        // dbg!(&root);
 
         let proof = tree.prove(&b"a".to_vec());
-        dbg!(&proof);
+        // dbg!(&proof);
 
         // verify proof
         let verified = tree.verify_proof(&proof.unwrap());
-        assert_eq!(verified, true);
+        assert!(verified);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_tree() -> Result<()> {
+        let tree = MerkleTree::new(0, Hash::default());
+        assert!(tree.is_err());
+        let err = tree.err().unwrap();
+        assert_eq!(err.to_string(), "Invalid leaf count");
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert() -> Result<()> {
+        let mut tree2 = MerkleTree::new(2, Hash::default())?;
+        tree2.insert(b"a")?;
+        tree2.insert(b"b")?;
+        let err = tree2.insert(b"c").err().unwrap();
+        assert_eq!(err.to_string(), "Exceeded leaf count");
+        Ok(())
+    }
+
+    #[quickcheck]
+    fn fuzz_insert(leaf: Vec<u8>) -> Result<()> {
+        let mut tree = MerkleTree::new(4, Hash::default())?;
+        tree.insert(leaf)?;
+        Ok(())
     }
 
     // TODO: Fuzz, and benchmark
