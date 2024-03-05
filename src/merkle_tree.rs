@@ -116,10 +116,14 @@ impl MerkleTree {
     }
 
     /// Returns the proof for give key
-    pub fn prove(&self, key: &Vec<u8>) -> Option<Vec<Hash>> {
+    pub fn prove(&mut self, key: &Vec<u8>) -> Option<Vec<Hash>> {
         let hash = hash_leaf!(key);
         if hash == self.default {
             return None;
+        }
+
+        if self.is_dirty {
+            self.update_root();
         }
 
         let from = self.nodes.len() - self.leaf_count;
@@ -138,9 +142,13 @@ impl MerkleTree {
         }
     }
 
-    pub fn verify_proof(&self, proof: &Vec<Hash>) -> bool {
+    pub fn verify_proof(&mut self, proof: &Vec<Hash>) -> bool {
         if proof.len() != (self.height + 1) as usize {
             return false;
+        }
+
+        if self.is_dirty {
+            self.update_root();
         }
 
         let from = self.nodes.len() - self.leaf_count;
